@@ -10,6 +10,13 @@ import Foundation
 import HealthKit
 import LoopKit
 
+// An InsulinCorrection can be one of four types, and each type can have different associated values.
+// When an insulin correction is created, one of these four types must be set with associated values
+// I'm still trying to figure out the meaning of each of those values. Current best guess:
+//   - min: the lowest GlucoseValue from the collection of predicted GlucoseValues
+//   - correcting: Not sure, but I think the eventual BG - last of the predicted values?
+//   - minTarget: The bottom of the correction range?
+//   - units: The units of insulin associated with the correction
 
 private enum InsulinCorrection {
     case inRange
@@ -21,6 +28,7 @@ private enum InsulinCorrection {
 
 extension InsulinCorrection {
     /// The delivery units for the correction
+    /// This simply provides access to the Double units that was provided when the InsulinCorrection was created (or zero for types that don't have units)
     private var units: Double {
         switch self {
         case .aboveRange(min: _, correcting: _, minTarget: _, units: let units):
@@ -194,11 +202,11 @@ private func targetGlucoseValue(percentEffectDuration: Double, minValue: Double,
     let useMinValueUntilPercent = 0.5
 
     guard percentEffectDuration > useMinValueUntilPercent else {
-        return minValue
+        return minValue // if percentEffectDuration is < 50%, return the minValue (suspend threshold)
     }
 
     guard percentEffectDuration < 1 else {
-        return maxValue
+        return maxValue // if percentEffectDuration is somehow > 100%, return the maxValue (average of correction range)
     }
 
     let slope = (maxValue - minValue) / (1 - useMinValueUntilPercent)
@@ -217,7 +225,7 @@ extension Collection where Element == GlucoseValue {
     ///   - suspendThreshold: The glucose value below which only suspension is returned
     ///   - sensitivity: The insulin sensitivity at the time of delivery
     ///   - model: The insulin effect model
-    /// - Returns: A correction value in units, if one could be calculated
+    /// - Returns: A correction value in units, if one could be calculated                              // Isn't this comment wrong? This function returns an InsulinCorrection, not a correction value.
     private func insulinCorrection(
         to correctionRange: GlucoseRangeSchedule,
         at date: Date,
@@ -225,19 +233,20 @@ extension Collection where Element == GlucoseValue {
         sensitivity: HKQuantity,
         model: InsulinModel
     ) -> InsulinCorrection? {
-        var minGlucose: GlucoseValue?
-        var eventualGlucose: GlucoseValue?
-        var correctingGlucose: GlucoseValue?
-        var minCorrectionUnits: Double?
+        var minGlucose: GlucoseValue?           // the prediction (type GlocuseValue) with the lowest value in the collection that is in the valid date range
+        var eventualGlucose: GlucoseValue?      // the last prediction in the valid date range
+        var correctingGlucose: GlucoseValue?    // of all the predicted GlucoseValues, this is the GlucoseValue that would require the least amount of insulin to move it to the "target" where target is described by func targetGlucoseValue()
+        var minCorrectionUnits: Double?         // the units of insulin that would be required to move correctingGlucose to the "target" line.
 
         // Only consider predictions within the model's effect duration
-        let validDateRange = DateInterval(start: date, duration: model.effectDuration)
+        let validDateRange = DateInterval(start: date, duration: model.effectDuration)      // model.effectDuration is how long the insulin has effect on blood glucose values
 
-        let unit = correctionRange.unit
-        let sensitivityValue = sensitivity.doubleValue(for: unit)
-        let suspendThresholdValue = suspendThreshold.doubleValue(for: unit)
+        let unit = correctionRange.unit                                                     // unit (mg/dl or mmol) used to describe the correction range
+        let sensitivityValue = sensitivity.doubleValue(for: unit)                           // ISF
+        let suspendThresholdValue = suspendThreshold.doubleValue(for: unit)                 // suspend threshold
 
         // For each prediction above target, determine the amount of insulin necessary to correct glucose based on the modeled effectiveness of the insulin at that time
+        // Original comment above says "for each prediction *above target*" - Didn't originally catch this, but this happens in the gaurd correctionUnits > 0
         for prediction in self {
             guard validDateRange.contains(prediction.startDate) else {
                 continue
@@ -250,40 +259,43 @@ extension Collection where Element == GlucoseValue {
 
             // Update range statistics
             if minGlucose == nil || prediction.quantity < minGlucose!.quantity {
-                minGlucose = prediction
+                minGlucose = prediction                                                     // capture the prediction with the lowest glucose value
             }
-            eventualGlucose = prediction
+            eventualGlucose = prediction                                                    // lazy way to capture the last prediction in the valid range
 
-            let predictedGlucoseValue = prediction.quantity.doubleValue(for: unit)
-            let time = prediction.startDate.timeIntervalSince(date)
+            let predictedGlucoseValue = prediction.quantity.doubleValue(for: unit)          // pull (Double) value out of prediction GlucoseValue
+            let time = prediction.startDate.timeIntervalSince(date)                         // time = time since the insulin correction time (zero time)
 
             // Compute the target value as a function of time since the dose started
             let targetValue = targetGlucoseValue(
-                percentEffectDuration: time / model.effectDuration,
-                minValue: suspendThresholdValue, 
-                maxValue: correctionRange.quantityRange(at: prediction.startDate).averageValue(for: unit)
-            )
+                percentEffectDuration: time / model.effectDuration,                                         // what percent of the way through the valid date range are we?
+                minValue: suspendThresholdValue,                                                            // obvious
+                maxValue: correctionRange.quantityRange(at: prediction.startDate).averageValue(for: unit)   // middle of the correction range
+            )                                                                                               // if the %effectDuration < 50%, targetValue = suspendThreshold. Then linear from suspendThreshold to middle of correction range
 
             // Compute the dose required to bring this prediction to target:
             // dose = (Glucose Δ) / (% effect × sensitivity)
 
-            let percentEffected = 1 - model.percentEffectRemaining(at: time)
-            let effectedSensitivity = percentEffected * sensitivityValue
+            let percentEffected = 1 - model.percentEffectRemaining(at: time)                // the percentEffectRemaining function returns the percentage of total insulin effect remaining at time time... (1 - percent effected) is something like the percentage of the insulin that would impact the BG at time time. Early on, very little of the insulin has had time to effect bg. By the end of the period, it has full effect.
+            let effectedSensitivity = percentEffected * sensitivityValue                    // I think I would call this something else - it's ISF * the % of insulin that's been able to have impact.
             guard let correctionUnits = insulinCorrectionUnits(
                 fromValue: predictedGlucoseValue,
                 toValue: targetValue,
                 effectedSensitivity: effectedSensitivity
-            ), correctionUnits > 0 else {
+                ), correctionUnits > 0 else {                                               // if correctionUnits < 0 (we're trying to raise BG to target line), don't do anything else with this prediction
                 continue
             }
 
             // Update the correction only if we've found a new minimum
+            // Note that the line above dictates that correctionUnits must be > 0
             guard minCorrectionUnits == nil || correctionUnits < minCorrectionUnits! else {
                 continue
             }
+            // This "min" is effectively determining the most insulin you can give at time "date" without causing future BG to go below the target line.
+            // The definition of the target line still feels somewhat arbitraty to me.
 
-            correctingGlucose = prediction
-            minCorrectionUnits = correctionUnits
+            correctingGlucose = prediction                                                  // the GlucoseValue that corresponds to the minCorrection
+            minCorrectionUnits = correctionUnits                                            // the smallest amount of insulin that will bring any one of the predictions to the target line
         }
 
         guard let eventual = eventualGlucose, let min = minGlucose else {
@@ -291,38 +303,39 @@ extension Collection where Element == GlucoseValue {
         }
 
         // Choose either the minimum glucose or eventual glocse as the correction delta
-        let minGlucoseTargets = correctionRange.quantityRange(at: min.startDate)
-        let eventualGlucoseTargets = correctionRange.quantityRange(at: eventual.startDate)
+        let minGlucoseTargets = correctionRange.quantityRange(at: min.startDate)            // get the correction range at the time of the minGlucose (which is now min)
+        let eventualGlucoseTargets = correctionRange.quantityRange(at: eventual.startDate)  // get the correction range at the time of the eventualGlucose (which is now eventual)
 
         // Treat the mininum glucose when both are below range
+        // If the minimum predicted glucose value and the eventual glucose value are both below the correction range at their respective times...
         if min.quantity < minGlucoseTargets.lowerBound &&
             eventual.quantity < eventualGlucoseTargets.lowerBound
         {
             let time = min.startDate.timeIntervalSince(date)
             // For time = 0, assume a small amount effected. This will result in large (negative) unit recommendation rather than no recommendation at all.
-            let percentEffected = Swift.max(.ulpOfOne, 1 - model.percentEffectRemaining(at: time))
+            let percentEffected = Swift.max(.ulpOfOne, 1 - model.percentEffectRemaining(at: time))      // I need to think about this more
 
             guard let units = insulinCorrectionUnits(
-                fromValue: min.quantity.doubleValue(for: unit),
-                toValue: minGlucoseTargets.averageValue(for: unit),
-                effectedSensitivity: sensitivityValue * percentEffected
+                fromValue: min.quantity.doubleValue(for: unit),                             // we're treating the min
+                toValue: minGlucoseTargets.averageValue(for: unit),                         // same
+                effectedSensitivity: sensitivityValue * percentEffected                     // as percentEffected goes to one, effectedSensitivity approaches ISF.
             ) else {
                 return nil
             }
 
             return .entirelyBelowRange(
-                correcting: min,
-                minTarget: minGlucoseTargets.lowerBound,
-                units: units
+                correcting: min,                                                            // correcting means which predicted BG value are we using to calculate a correction - in this case, it's the min, not eventual
+                minTarget: minGlucoseTargets.lowerBound,                                    // bottom of correction range at time of min predicted BG
+                units: units                                                                //
             )
-        } else if eventual.quantity > eventualGlucoseTargets.upperBound,
+        } else if eventual.quantity > eventualGlucoseTargets.upperBound,                    // from the if that matches this else: if (minimum predicted BG OR eventual predicted BG is within or above correction range) AND from the else if on this line: eventual BG is above the correction range
             let minCorrectionUnits = minCorrectionUnits, let correctingGlucose = correctingGlucose
         {
-            return .aboveRange(
-                min: min,
-                correcting: correctingGlucose,
-                minTarget: eventualGlucoseTargets.lowerBound,
-                units: minCorrectionUnits
+            return .aboveRange(                                                             // .aboveRange means eventual BG is above range - other parts of the prediction could be below range
+                min: min,                                                                   // just the min BG from the predictions
+                correcting: correctingGlucose,                                              // this is the BG that corresponds to the minCorrection
+                minTarget: eventualGlucoseTargets.lowerBound,                               // interesting that even though the correcting glucose corresponds to minCorrection, the minTarget is the lower bound of the correction range at the time of eventual BG
+                units: minCorrectionUnits                                                   // the smallest amount of insulin that will bring any one of the predictions to the target line
             )
         } else {
             return .inRange
