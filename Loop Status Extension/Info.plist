@@ -19,7 +19,7 @@
 	<key>CFBundlePackageType</key>
 	<string>XPC!</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.10.0.1dev-jojo-ella</string>
+	<string>1.10.0.2dev-jojo-ella</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>AppGroupIdentifier</key>
