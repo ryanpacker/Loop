@@ -174,11 +174,12 @@ extension TempBasalRecommendation {
 /// - Returns: The insulin correction in units
 private func insulinCorrectionUnits(fromValue: Double, toValue: Double, effectedSensitivity: Double) -> Double? {
     guard effectedSensitivity > 0 else {
+        print("\tinsulinCorrectionUnits: nil")
         return nil
     }
 
     let glucoseCorrection = fromValue - toValue
-
+    print("\tinsulinCorrectionUnits: \(glucoseCorrection / effectedSensitivity)")
     return glucoseCorrection / effectedSensitivity
 }
 
@@ -238,18 +239,25 @@ extension Collection where Element == GlucoseValue {
         let suspendThresholdValue = suspendThreshold.doubleValue(for: unit)
 
         // For each prediction above target, determine the amount of insulin necessary to correct glucose based on the modeled effectiveness of the insulin at that time
+        print("\nInsulinCorrection requested\n")
         for prediction in self {
+            print("\nprediction: \(prediction)")
             guard validDateRange.contains(prediction.startDate) else {
+                print("\tthe prediction was outside of the valid date range")
+                print("\t\tvalidDateRange: \(validDateRange)")
                 continue
             }
 
             // If any predicted value is below the suspend threshold, return immediately
             guard prediction.quantity >= suspendThreshold else {
+                print("\tthe prediction was below the suspend threshold")
+                print("\t\tsuspendThreshold: \(suspendThreshold)")
                 return .suspend(min: prediction)
             }
 
             // Update range statistics
             if minGlucose == nil || prediction.quantity < minGlucose!.quantity {
+                print("\twe found a new minGlucose")
                 minGlucose = prediction
             }
             eventualGlucose = prediction
@@ -263,12 +271,19 @@ extension Collection where Element == GlucoseValue {
                 minValue: suspendThresholdValue, 
                 maxValue: correctionRange.quantityRange(at: prediction.startDate).averageValue(for: unit)
             )
-
+            
+            
+            print("\ttargetValue: \(targetValue)")
+            print("\tpercentEffectDuration: \(time / model.effectDuration)")
             // Compute the dose required to bring this prediction to target:
             // dose = (Glucose Δ) / (% effect × sensitivity)
 
             let percentEffected = 1 - model.percentEffectRemaining(at: time)
             let effectedSensitivity = percentEffected * sensitivityValue
+            
+            print("\tpercentEffected: \(percentEffected)")
+            print("\teffectedSensitivity: \(effectedSensitivity)")
+            
             guard let correctionUnits = insulinCorrectionUnits(
                 fromValue: predictedGlucoseValue,
                 toValue: targetValue,
@@ -284,12 +299,16 @@ extension Collection where Element == GlucoseValue {
 
             correctingGlucose = prediction
             minCorrectionUnits = correctionUnits
+            print("\twe found a new minCorrectionUnits: \(String(describing: minCorrectionUnits))")
         }
 
         guard let eventual = eventualGlucose, let min = minGlucose else {
+            print("something went wrong and either eventual or min couldn't be set")
             return nil
         }
 
+        print("\nwe are through the insulinCorrectionGuard section of code\n")
+        
         // Choose either the minimum glucose or eventual glocse as the correction delta
         let minGlucoseTargets = correctionRange.quantityRange(at: min.startDate)
         let eventualGlucoseTargets = correctionRange.quantityRange(at: eventual.startDate)
@@ -307,6 +326,7 @@ extension Collection where Element == GlucoseValue {
                 toValue: minGlucoseTargets.averageValue(for: unit),
                 effectedSensitivity: sensitivityValue * percentEffected
             ) else {
+                print("something went wrong and units couldn't be set")
                 return nil
             }
 
@@ -368,6 +388,7 @@ extension Collection where Element == GlucoseValue {
             sensitivity: sensitivity.quantity(at: date),
             model: model
         )
+        print("We have an InsulinCorrection: \(String(describing: correction))")
 
         let scheduledBasalRate = basalRates.value(at: date)
         var maxBasalRate = maxBasalRate
@@ -385,6 +406,7 @@ extension Collection where Element == GlucoseValue {
             duration: duration,
             rateRounder: rateRounder
         )
+        print("We have a TempBasal: \(String(describing: temp))")
 
         return temp?.ifNecessary(
             at: date,
