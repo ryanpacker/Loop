@@ -125,7 +125,7 @@ class RecommendTempBasalTests: XCTestCase {
         let myGlucose                       = loadGlucoseValueFixture("recommend_temp_basal_ghost-zerotemp1")
         let mySuspendThreshold              = GlucoseThreshold(unit: HKUnit.milligramsPerDeciliter, value: 65)
         let myInsulinSensitivitySchedule    = InsulinSensitivitySchedule(unit: HKUnit.milligramsPerDeciliter, dailyItems: [RepeatingScheduleValue(startTime: 0.0, value: 150.0)])!
-        let myInsulinModel                  = ExponentialInsulinModel(actionDuration: 360, peakActivityTime: 65, initialDelay: 20) //humalog child
+        let myInsulinModel                  = ExponentialInsulinModel(actionDuration: .minutes(360), peakActivityTime: .minutes(65), initialDelay: .minutes(20)) //humalog child
         let myBasalRateSchedule             = loadBasalRateScheduleFixture("ghost-zerotemp_basal_profile")
         let myMaxBasalRate                  = 2.0
         
@@ -141,10 +141,10 @@ class RecommendTempBasalTests: XCTestCase {
             rateRounder: {(x: Double)-> Double in return Double(Int(x / 0.025)) * 0.025}
         )
         print("==========================")
-        print(dose)
+        print(dose!)
         print("==========================")
 
-        XCTAssertEqual(0.7, dose!.unitsPerHour, accuracy: 1.0 / 40.0)
+        XCTAssertEqual(0.7, dose!.unitsPerHour, accuracy: 0.001)
         XCTAssertEqual(TimeInterval(minutes: 30), dose!.duration)
     }
 
